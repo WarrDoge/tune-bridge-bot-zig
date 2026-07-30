@@ -334,3 +334,67 @@ test "CircuitBreaker basic" {
     try std.testing.expect(r2 != error.CircuitOpen);
     try std.testing.expectEqual(CircuitState.Closed, cb.state);
 }
+
+test "CircuitBreaker success resets failures" {
+    var cb = CircuitBreaker.init("reset-test", 3, 50);
+
+    // 2 failures
+    for (0..2) |_| {
+        _ = cb.execute(struct {
+            fn op() anyerror![]const u8 {
+                return error.Fail;
+            }
+        }.op);
+    }
+    try std.testing.expectEqual(@as(u32, 2), cb.failures);
+
+    // Success resets counter
+    const r = cb.execute(struct {
+        fn op() anyerror![]const u8 {
+            return "ok";
+        }
+    }.op);
+    try std.testing.expectEqualStrings("ok", r catch unreachable);
+    try std.testing.expectEqual(@as(u32, 0), cb.failures);
+    try std.testing.expectEqual(CircuitState.Closed, cb.state);
+}
+
+test "TTLCache set overwrite" {
+    var cache = TTLCache.init(std.testing.allocator, 60_000);
+    defer cache.deinit();
+
+    try cache.set("key", "value1");
+    try cache.set("key", "value2");
+    try std.testing.expectEqualStrings("value2", cache.get("key").?);
+}
+
+test "TTLCache capacity eviction" {
+    var cache = TTLCache.init(std.testing.allocator, 60_000);
+    cache.max_capacity = 3;
+    defer cache.deinit();
+
+    try cache.set("k1", "v1");
+    try cache.set("k2", "v2");
+    try cache.set("k3", "v3");
+    // Should still fit 3
+    try std.testing.expect(cache.get("k1") != null);
+    try std.testing.expect(cache.get("k2") != null);
+    try std.testing.expect(cache.get("k3") != null);
+
+    // k4 should evict one
+    try cache.set("k4", "v4");
+    try std.testing.expect(cache.get("k4") != null);
+    // At most 3 entries remain
+    var count: usize = 0;
+    var it = cache.map.iterator();
+    while (it.next()) |_| count += 1;
+    try std.testing.expect(count <= 3);
+}
+
+test "HttpClient init" {
+    const client = HttpClient.init(std.testing.allocator, 5000, 2, 100, 300);
+    try std.testing.expectEqual(@as(u64, 5000), client.timeout_ms);
+    try std.testing.expectEqual(@as(u32, 2), client.retry_attempts);
+    try std.testing.expectEqual(@as(u64, 100), client.retry_min_delay_ms);
+    try std.testing.expectEqual(@as(u64, 300), client.retry_max_delay_ms);
+}
