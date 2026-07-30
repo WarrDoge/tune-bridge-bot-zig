@@ -457,3 +457,210 @@ test "splitByDash with em dash" {
     try testing.expectEqualStrings("Blinding Lights", r.?.left);
     try testing.expectEqualStrings("The Weeknd", r.?.right);
 }
+
+test "containsCi basic" {
+    try testing.expect(containsCi("Hello World", "world"));
+    try testing.expect(containsCi("Hello World", "hello"));
+    try testing.expect(!containsCi("Hello World", "xyz"));
+    try testing.expect(containsCi("", ""));
+}
+
+test "toLower" {
+    const alloc = testing.allocator;
+    const r = toLower(alloc, "Hello WORLD!");
+    defer alloc.free(r);
+    try testing.expectEqualStrings("hello world!", r);
+    {
+        const empty = toLower(alloc, "");
+        defer alloc.free(empty);
+        try testing.expectEqualStrings("", empty);
+    }
+}
+
+test "normalizeQuery" {
+    const alloc = testing.allocator;
+    const q = try normalizeQuery(alloc, "Billie Eilish", "bad guy");
+    defer alloc.free(q);
+    try testing.expectEqualStrings("billie eilish bad guy", q);
+}
+
+test "normalizeQuery strips parens" {
+    const alloc = testing.allocator;
+    const q = try normalizeQuery(alloc, "Artist", "Song (Remix)");
+    defer alloc.free(q);
+    try testing.expectEqualStrings("artist song", q);
+}
+
+test "urlEncode" {
+    const alloc = testing.allocator;
+    const e = try urlEncode(alloc, "hello world");
+    defer alloc.free(e);
+    try testing.expectEqualStrings("hello%20world", e);
+}
+
+test "extractMetaContent" {
+    const html = "<meta property=\"og:title\" content=\"Test Song\" />";
+    const r = extractMetaContent(html, "og:title");
+    try testing.expect(r != null);
+    try testing.expectEqualStrings("Test Song", r.?);
+}
+
+test "extractMetaContent not found" {
+    try testing.expect(extractMetaContent("<html></html>", "og:title") == null);
+}
+
+test "freeIfAllocated" {
+    const alloc = testing.allocator;
+    const s = try alloc.dupe(u8, "test");
+    freeIfAllocated(alloc, s);
+    // Should not crash on empty string
+    freeIfAllocated(alloc, "");
+}
+
+test "splitFromOgTitle by" {
+    const r = splitFromOgTitle("Blinding Lights by The Weeknd | Spotify", "");
+    try testing.expectEqualStrings("Blinding Lights", r.title);
+    try testing.expectEqualStrings("The Weeknd", r.artist);
+}
+
+test "splitFromOgTitle no suffix" {
+    const r = splitFromOgTitle("Bad Guy", "");
+    try testing.expectEqualStrings("Bad Guy", r.title);
+    try testing.expectEqualStrings("", r.artist);
+}
+
+test "splitFromOgTitle dash" {
+    const r = splitFromOgTitle("Shape of You \u{2014} Ed Sheeran", "");
+    try testing.expectEqualStrings("Shape of You", r.title);
+    try testing.expectEqualStrings("Ed Sheeran", r.artist);
+}
+
+test "cleanYoutubeInfo strip topic" {
+    const alloc = testing.allocator;
+    const r = try cleanYoutubeInfo(alloc, "Song Title", "Artist Name - Topic");
+    defer alloc.free(r.title);
+    defer alloc.free(r.artist);
+    try testing.expectEqualStrings("Artist Name", r.artist);
+    try testing.expectEqualStrings("Song Title", r.title);
+}
+
+test "cleanYoutubeInfo strip artist prefix from title" {
+    const alloc = testing.allocator;
+    const r = try cleanYoutubeInfo(alloc, "Artist Name - Song Title", "Artist Name");
+    defer alloc.free(r.title);
+    defer alloc.free(r.artist);
+    try testing.expectEqualStrings("Song Title", r.title);
+    try testing.expectEqualStrings("Artist Name", r.artist);
+}
+
+test "cleanYoutubeInfo no stripping needed" {
+    const alloc = testing.allocator;
+    const r = try cleanYoutubeInfo(alloc, "Song", "Artist");
+    defer alloc.free(r.title);
+    defer alloc.free(r.artist);
+    try testing.expectEqualStrings("Song", r.title);
+    try testing.expectEqualStrings("Artist", r.artist);
+}
+
+test "Config.fromEnv missing token" {
+    const alloc = testing.allocator;
+    try testing.expectError(error.MissingToken, Config.fromEnv(alloc));
+}
+
+test "extractBetween not found" {
+    try testing.expect(extractBetween("hello", "{{", "}}") == null);
+}
+
+test "levenshtein empty" {
+    try testing.expectEqual(@as(usize, 5), levenshtein("", "hello"));
+    try testing.expectEqual(@as(usize, 5), levenshtein("hello", ""));
+    try testing.expectEqual(@as(usize, 0), levenshtein("", ""));
+}
+
+test "calculateSimilarity identical" {
+    try testing.expect(calculateSimilarity("hello world", "hello world") > 0.99);
+}
+
+test "calculateSimilarity empty" {
+    try testing.expect(calculateSimilarity("", "") > 0.99);
+    try testing.expect(calculateSimilarity("hello", "") == 0.0);
+}
+
+test "splitByDash en dash" {
+    const r = splitByDash("Shape of You \u{2013} Ed Sheeran");
+    try testing.expect(r != null);
+    try testing.expectEqualStrings("Shape of You", r.?.left);
+    try testing.expectEqualStrings("Ed Sheeran", r.?.right);
+}
+
+test "splitByDash regular dash" {
+    const r = splitByDash("Shape of You - Ed Sheeran");
+    try testing.expect(r != null);
+    try testing.expectEqualStrings("Shape of You", r.?.left);
+    try testing.expectEqualStrings("Ed Sheeran", r.?.right);
+}
+
+test "splitByDash not found" {
+    try testing.expect(splitByDash("just a string") == null);
+}
+
+test "firstUrl with trailing punctuation" {
+    try testing.expectEqualStrings("https://example.com", firstUrl("visit https://example.com!").?);
+}
+
+test "extractHost no scheme" {
+    try testing.expect(extractHost("not-a-url") == null);
+}
+
+test "extractHost with port" {
+    try testing.expectEqualStrings("localhost:8080", extractHost("http://localhost:8080/health").?);
+}
+
+test "normalizeForMatch strips brackets" {
+    const alloc = testing.allocator;
+    const n = try normalizeForMatch(alloc, "Song [Instrumental]");
+    defer alloc.free(n);
+    try testing.expectEqualStrings("song", n);
+}
+
+test "normalizeForMatch ampersand" {
+    const alloc = testing.allocator;
+    const n = try normalizeForMatch(alloc, "Rock & Roll");
+    defer alloc.free(n);
+    try testing.expectEqualStrings("rock and roll", n);
+}
+
+test "normalizeForMatch multiple spaces" {
+    const alloc = testing.allocator;
+    const n = try normalizeForMatch(alloc, "Hello    World");
+    defer alloc.free(n);
+    try testing.expectEqualStrings("hello world", n);
+}
+
+test "isAlbumish volume" {
+    try testing.expect(isAlbumish("Music from the Show Vol. 1"));
+    try testing.expect(isAlbumish("Season 1 Soundtrack"));
+    try testing.expect(!isAlbumish(""));
+}
+
+test "looksLikeArtistList feat" {
+    try testing.expect(looksLikeArtistList("Artist feat. Another"));
+    try testing.expect(looksLikeArtistList("A and B"));
+    try testing.expect(!looksLikeArtistList("Normal Person"));
+    try testing.expect(!looksLikeArtistList(""));
+    try testing.expect(!looksLikeArtistList("Title: Subtitle"));
+}
+
+test "md2 multiple chars" {
+    const alloc = testing.allocator;
+    const e = try md2(alloc, "*Hello* [World]");
+    defer alloc.free(e);
+    try testing.expectEqualStrings("\\\\*Hello\\\\* \\\\[World\\\\]", e);
+}
+
+test "md2 no special chars" {
+    const alloc = testing.allocator;
+    const e = try md2(alloc, "Hello World");
+    defer alloc.free(e);
+    try testing.expectEqualStrings("Hello World", e);
+}
