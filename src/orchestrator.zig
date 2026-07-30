@@ -109,23 +109,417 @@ pub const Orchestrator = struct {
 test "toYoutubeMusicUrl" {
     const alloc = std.testing.allocator;
     {
+        // Standard youtube.com URL
         const got = try Orchestrator.toYoutubeMusicUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ", alloc);
         defer alloc.free(got);
         try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
     }
     {
+        // Short youtu.be URL
         const got = try Orchestrator.toYoutubeMusicUrl("https://youtu.be/dQw4w9WgXcQ", alloc);
         defer alloc.free(got);
         try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
     }
     {
+        // Already a music.youtube.com URL — pass through unchanged
         const got = try Orchestrator.toYoutubeMusicUrl("https://music.youtube.com/watch?v=dQw4w9WgXcQ", alloc);
         defer alloc.free(got);
         try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
     }
     {
+        // youtu.be with query params (si=, t=)
         const got = try Orchestrator.toYoutubeMusicUrl("https://youtu.be/dQw4w9WgXcQ?si=abc123&t=30", alloc);
         defer alloc.free(got);
         try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
     }
+    {
+        // URL with extra query params after ?v=
+        const got = try Orchestrator.toYoutubeMusicUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc&index=1", alloc);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
+    }
+    {
+        // Non-YouTube URL — not converted, passed through
+        const got = try Orchestrator.toYoutubeMusicUrl("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT", alloc);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT", got);
+    }
+    {
+        // m.youtube.com URL
+        const got = try Orchestrator.toYoutubeMusicUrl("https://m.youtube.com/watch?v=dQw4w9WgXcQ", alloc);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
+    }
+    {
+        // http (not https) youtu.be
+        const got = try Orchestrator.toYoutubeMusicUrl("http://youtu.be/dQw4w9WgXcQ", alloc);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
+    }
+    {
+        // Short URL with & instead of ? for first param (edge case in indexOfAny)
+        const got = try Orchestrator.toYoutubeMusicUrl("https://youtu.be/dQw4w9WgXcQ&si=abc", alloc);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
+    }
+}
+
+test "extractSongInfo — no URL returns null" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    try std.testing.expect((try orch.extractSongInfo(alloc, "just some text")) == null);
+    try std.testing.expect((try orch.extractSongInfo(alloc, "")) == null);
+}
+
+test "extractSongInfo — unknown host returns null" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    try std.testing.expect((try orch.extractSongInfo(alloc, "https://example.com/foo")) == null);
+    try std.testing.expect((try orch.extractSongInfo(alloc, "https://some-unknown-site.org/path")) == null);
+}
+
+test "extractSongInfo — spotify.link short URL routes to spotify branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    // spotify.link → should try to resolve → will error (no network), but not null
+    const result = orch.extractSongInfo(alloc, "https://spotify.link/abc123");
+    try std.testing.expect(result != null);
+    // It should be an error — the HTTP call fails
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — open.spotify.com routes to spotify branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — music.youtube.com routes to youtube branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://music.youtube.com/watch?v=dQw4w9WgXcQ");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — www.youtube.com routes through toYoutubeMusicUrl then youtube branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    // www.youtube.com → gets converted to music.youtube.com → tries HTTP → errors
+    const result = orch.extractSongInfo(alloc, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — youtu.be routes through toYoutubeMusicUrl then youtube branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://youtu.be/dQw4w9WgXcQ");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — music.apple.com routes to apple music branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://music.apple.com/us/album/song/123");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — text with multiple URLs picks the first one" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    // First URL is unknown host → null
+    const result = orch.extractSongInfo(alloc, "https://first.unknown/foo and https://music.youtube.com/watch?v=abc");
+    try std.testing.expect(result == null);
+}
+
+test "extractSongInfo — m.youtube.com routes through toYoutubeMusicUrl" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://m.youtube.com/watch?v=dQw4w9WgXcQ");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — www.youtube.com with playlist id" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc&index=1");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — itunes.apple.com routes to apple music branch" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const result = orch.extractSongInfo(alloc, "https://itunes.apple.com/us/album/song/123");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — text with trailing whitespace and newline" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    // Text with trailing newline gets trimmed
+    const result = orch.extractSongInfo(alloc, "  https://music.youtube.com/watch?v=dQw4w9WgXcQ  \n");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "extractSongInfo — only http (not https) URL" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    // http://open.spotify.com — dev-only, but should route to spotify branch
+    const result = orch.extractSongInfo(alloc, "http://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT");
+    try std.testing.expect(result != null);
+    try std.testing.expectError(error.ConnectionRefused, result);
+}
+
+test "toYoutubeMusicUrl — empty string" {
+    const alloc = std.testing.allocator;
+    // Empty passthrough — no conversion
+    const got = try Orchestrator.toYoutubeMusicUrl("", alloc);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("", got);
+}
+
+test "toYoutubeMusicUrl — youtu.be with timestamp param" {
+    const alloc = std.testing.allocator;
+    const got = try Orchestrator.toYoutubeMusicUrl("https://youtu.be/dQw4w9WgXcQ?t=30", alloc);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=dQw4w9WgXcQ", got);
+}
+
+test "toYoutubeMusicUrl — www.youtube.com with no v param passes through" {
+    const alloc = std.testing.allocator;
+    const got = try Orchestrator.toYoutubeMusicUrl("https://www.youtube.com/playlist?list=PLabc", alloc);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://www.youtube.com/playlist?list=PLabc", got);
+}
+
+test "toYoutubeMusicUrl — youtu.be with no video id" {
+    const alloc = std.testing.allocator;
+    const got = try Orchestrator.toYoutubeMusicUrl("https://youtu.be/", alloc);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://music.youtube.com/watch?v=", got);
+}
+
+test "findOnAllPlatforms — same platform as spotify returns original_url for spotify" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const info = util.SongInfo{
+        .title = "Test Song",
+        .artist = "Test Artist",
+        .album = "",
+        .platform = "Spotify",
+        .original_url = "https://open.spotify.com/track/1234567890123456789abc",
+    };
+    const links = try orch.findOnAllPlatforms(alloc, &info);
+    defer {
+        util.freeIfAllocated(alloc, links.spotify);
+        util.freeIfAllocated(alloc, links.youtube_music);
+        util.freeIfAllocated(alloc, links.apple_music);
+    }
+    try std.testing.expectEqualStrings(info.original_url, links.spotify);
+}
+
+test "findOnAllPlatforms — same platform as youtube returns original_url for youtube_music" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const info = util.SongInfo{
+        .title = "Test Song",
+        .artist = "Test Artist",
+        .album = "",
+        .platform = "YouTube Music",
+        .original_url = "https://music.youtube.com/watch?v=abc123",
+    };
+    const links = try orch.findOnAllPlatforms(alloc, &info);
+    defer {
+        util.freeIfAllocated(alloc, links.spotify);
+        util.freeIfAllocated(alloc, links.youtube_music);
+        util.freeIfAllocated(alloc, links.apple_music);
+    }
+    try std.testing.expectEqualStrings(info.original_url, links.youtube_music);
+}
+
+test "findOnAllPlatforms — same platform as youtube (not music) returns original_url for youtube_music" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const info = util.SongInfo{
+        .title = "Test Song",
+        .artist = "Test Artist",
+        .album = "",
+        .platform = "YouTube",
+        .original_url = "https://youtube.com/watch?v=abc123",
+    };
+    const links = try orch.findOnAllPlatforms(alloc, &info);
+    defer {
+        util.freeIfAllocated(alloc, links.spotify);
+        util.freeIfAllocated(alloc, links.youtube_music);
+        util.freeIfAllocated(alloc, links.apple_music);
+    }
+    try std.testing.expectEqualStrings(info.original_url, links.youtube_music);
+}
+
+test "findOnAllPlatforms — same platform as apple music returns original_url for apple_music" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const info = util.SongInfo{
+        .title = "Test Song",
+        .artist = "Test Artist",
+        .album = "",
+        .platform = "Apple Music",
+        .original_url = "https://music.apple.com/us/album/song/123",
+    };
+    const links = try orch.findOnAllPlatforms(alloc, &info);
+    defer {
+        util.freeIfAllocated(alloc, links.spotify);
+        util.freeIfAllocated(alloc, links.youtube_music);
+        util.freeIfAllocated(alloc, links.apple_music);
+    }
+    try std.testing.expectEqualStrings(info.original_url, links.apple_music);
+}
+
+test "findOnAllPlatforms — non-matching platforms try to search (caught errors become empty)" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const info = util.SongInfo{
+        .title = "Test Song",
+        .artist = "Test Artist",
+        .album = "",
+        .platform = "SoundCloud",
+        .original_url = "https://soundcloud.com/artist/test-song",
+    };
+    const links = try orch.findOnAllPlatforms(alloc, &info);
+    defer {
+        util.freeIfAllocated(alloc, links.spotify);
+        util.freeIfAllocated(alloc, links.youtube_music);
+        util.freeIfAllocated(alloc, links.apple_music);
+    }
+    try std.testing.expectEqualStrings("", links.spotify);
+    try std.testing.expectEqualStrings("", links.youtube_music);
+    try std.testing.expectEqualStrings("", links.apple_music);
+}
+
+test "findOnAllPlatforms — only spotify original, others search" {
+    const alloc = std.testing.allocator;
+    var cache = infra.TTLCache.init(alloc, 60_000);
+    defer cache.deinit();
+    var breaker = infra.CircuitBreaker.init("test", 5, 60_000);
+    const http = infra.HttpClient.init(alloc, 1000, 0, 0, 0);
+    var orch = Orchestrator.init(http, &cache, &breaker);
+
+    const info = util.SongInfo{
+        .title = "Test Song",
+        .artist = "Test Artist",
+        .album = "",
+        .platform = "Spotify",
+        .original_url = "https://open.spotify.com/track/abc123def456ghi789",
+    };
+    const links = try orch.findOnAllPlatforms(alloc, &info);
+    defer {
+        util.freeIfAllocated(alloc, links.spotify);
+        util.freeIfAllocated(alloc, links.youtube_music);
+        util.freeIfAllocated(alloc, links.apple_music);
+    }
+    try std.testing.expectEqualStrings(info.original_url, links.spotify);
 }
