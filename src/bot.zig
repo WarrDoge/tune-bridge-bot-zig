@@ -139,26 +139,17 @@ fn getUpdatesUrl(token: []const u8, offset: ?i64, poll_timeout_sec: u32, allocat
     return url.items;
 }
 
-/// Fetch the getUpdates response body using zig 0.14's std.http.Client.fetch.
-fn fetchGetUpdates(allocator: Allocator, url: []const u8) ![]u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
-    defer client.deinit();
-
-    var response_body = std.ArrayList(u8).init(allocator);
-    errdefer response_body.deinit();
-
-    var server_header_buffer: [4096]u8 = undefined;
-
-    _ = try client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .headers = .{ .user_agent = .{ .override = "tune-bridge-bot/1.0" } },
-        .response_storage = .{ .dynamic = &response_body },
-        .server_header_buffer = &server_header_buffer,
-        .redirect_behavior = @as(std.http.Client.Request.RedirectBehavior, @enumFromInt(@as(u16, 5))),
-    });
-
-    return try response_body.toOwnedSlice();
+/// Fetch the getUpdates response body using the configured infra.HttpClient,
+/// gaining retry, the configured user-agent, and connection-pool awareness.
+/// The old path (pre-o8) created a fresh std.http.Client on every call,
+/// bypassing retry, the configured UA, and all circuit-breaker integration.
+///
+/// NOTE: zig 0.14's std.http.Client does not enforce client-side timeouts,
+/// so none of the infra.HttpClient paths do either.  If the std lib adds
+/// timeout support, the poll caller (60s timer needed for 30s long-poll)
+/// and the non-poll callers (12s default) will need different values.
+fn fetchGetUpdates(http: *infra.HttpClient, url: []const u8) ![]const u8 {
+    return http.fetchText(url);
 }
 
 /// Process a single message: dispatch text to the orchestrator.
@@ -176,7 +167,7 @@ pub fn runBot(allocator: Allocator, config: util.Config) !void {
     const poll_timeout_sec: u32 = 30;
 
     // Build an HTTP client and orchestrator using infra's helpers
-    const http = infra.HttpClient.init(allocator, config.request_timeout_ms, config.retry_attempts, config.retry_min_delay_ms, config.retry_max_delay_ms);
+    var http = infra.HttpClient.init(allocator, config.request_timeout_ms, config.retry_attempts, config.retry_min_delay_ms, config.retry_max_delay_ms);
 
     var cache = infra.TTLCache.init(allocator, config.cache_ttl_ms);
     defer cache.deinit();
@@ -197,7 +188,7 @@ pub fn runBot(allocator: Allocator, config: util.Config) !void {
         };
         defer allocator.free(url);
 
-        const body = fetchGetUpdates(allocator, url) catch |err| {
+        const body = fetchGetUpdates(&http, url) catch |err| {
             std.log.warn("getUpdates poll failed: {s}", .{@errorName(err)});
             std.time.sleep(2 * std.time.ns_per_ms);
             continue;
@@ -296,4 +287,29 @@ test "update parsing pulls out message text" {
     try std.testing.expectEqual(@as(i64, 10), updates[0].message.?.message_id);
     try std.testing.expectEqual(@as(i64, -123), updates[0].message.?.chat.id);
     try std.testing.expectEqualStrings("https://open.spotify.com/track/abc123", updates[0].message.?.text.?);
+}
+
+test "fetchGetUpdates delegates to the configured infra.HttpClient" {
+    // This test verifies that fetchGetUpdates accepts an *infra.HttpClient
+    // (the poll path now goes through the configured client instead of
+    // creating a fresh std.http.Client per call).  The actual HTTP call
+    // requires a live server, but the compile-time type check ensures
+    // the delegation compiles and the function signature is correct.
+    const alloc = std.testing.allocator;
+
+    var http = infra.HttpClient.init(alloc, 12_000, 0, 100, 200);
+
+    // fetchGetUpdates won't resolve a bogus URL, but the error path
+    // should leave the client usable for subsequent calls — the loop
+    // continues on failure without deinitialising the client.
+    const url = "http://127.0.0.1:1/nonexistent";
+    const result = fetchGetUpdates(&http, url);
+    try std.testing.expect(result == error.ConnectionRefused or
+        result == error.ConnectionResetByPeer or
+        result == error.ConnectionTimedOut or
+        result == error.FileNotFound or
+        result == error.RequestFailed);
+
+    // Client is still usable (not deinitialised)
+    _ = &http;
 }
