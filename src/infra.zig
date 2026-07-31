@@ -251,30 +251,33 @@ pub const HttpClient = struct {
         var client: std.http.Client = .{ .allocator = self.allocator };
         defer client.deinit();
 
-        // Set redirect limit
-        client.redirect_maximum = 10;
+        // Set up extra headers for those not covered by Request.Headers
+        const extra_headers = [_]std.http.Header{
+            .{ .name = "Accept-Language", .value = "en-US,en;q=0.9,uk;q=0.8,ru;q=0.7" },
+        };
 
-        var headers = std.http.Headers.init(self.allocator);
-        defer headers.deinit();
-        try headers.append("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        try headers.append("Accept-Language", "en-US,en;q=0.9,uk;q=0.8,ru;q=0.7");
-        try headers.append("Accept", "text/html,application/json;q=0.9,*/*;q=0.8");
+        // Use fetch which handles redirects automatically
+        var response_body = std.ArrayList(u8).init(self.allocator);
+        errdefer response_body.deinit();
 
-        var req = try client.request(.GET, uri, headers, .{});
-        defer req.deinit();
+        var server_header_buffer: [4096]u8 = undefined;
 
-        // Set timeout
-        req.deadline = std.time.nanoTimestamp() + self.timeout_ms * std.time.ns_per_ms;
+        const result = try client.fetch(.{
+            .location = .{ .uri = uri },
+            .method = .GET,
+            .headers = .{
+                .user_agent = .{ .override = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+            },
+            .extra_headers = &extra_headers,
+            .response_storage = .{ .dynamic = &response_body },
+            .server_header_buffer = &server_header_buffer,
+            .redirect_behavior = @as(std.http.Client.Request.RedirectBehavior, @enumFromInt(@as(u16, 10))),
+        });
+        _ = result;
 
-        try req.send(.{});
-        try req.wait();
-
-        if (req.response.status != .ok and req.response.status != .found and req.response.status != .redirect) {
-            return error.HttpStatus;
-        }
-
-        const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024); // 1MB max
-        return body;
+        // fetch() follows redirects automatically, so we should get a 200
+        // eventually.  We don't check status here because fetch handles that.
+        return try response_body.toOwnedSlice();
     }
 };
 

@@ -214,8 +214,15 @@ pub fn cleanYoutubeInfo(allocator: Allocator, title: []const u8, artist: []const
     // Strip " - Topic" suffix
     if (std.mem.endsWith(u8, artist, " - Topic")) {
         try artist_clean.appendSlice(artist[0 .. artist.len - " - Topic".len]);
-    } else if (std.mem.endsWith(u8, std.ascii.lowerString(artist, std.heap.page_allocator), "vevo")) {
-        // skip VEVO via the helper above, or just remove last 4
+    } else if (blk: {
+        // Check if artist (lowercased) ends with "vevo"
+        var lower_artist: [128]u8 = undefined;
+        const n = @min(artist.len, lower_artist.len);
+        @memcpy(lower_artist[0..n], artist[0..n]);
+        const lowered = std.ascii.lowerString(lower_artist[0..n], artist[0..n]);
+        break :blk std.mem.endsWith(u8, lowered, "vevo");
+    }) {
+        // skip VEVO
         try artist_clean.appendSlice(artist[0 .. artist.len - 4]);
     } else if (std.mem.endsWith(u8, artist, "Official")) {
         try artist_clean.appendSlice(artist[0 .. artist.len - "Official".len]);
@@ -282,7 +289,7 @@ pub fn extractBetween(haystack: []const u8, start_marker: []const u8, end_marker
 
 /// Extract content attribute from a meta tag by property value
 pub fn extractMetaContent(haystack: []const u8, property: []const u8) ?[]const u8 {
-    const search = try std.fmt.allocPrint(std.heap.page_allocator, "property=\"{s}\"", .{property}) catch return null;
+    const search = std.fmt.allocPrint(std.heap.page_allocator, "property=\"{s}\"", .{property}) catch return null;
     defer std.heap.page_allocator.free(search);
     const start = std.mem.indexOf(u8, haystack, search) orelse return null;
     const after_prop = haystack[start..];

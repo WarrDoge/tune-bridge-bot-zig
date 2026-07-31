@@ -65,7 +65,7 @@ pub const Orchestrator = struct {
             std.mem.eql(u8, host, "m.youtube.com") or
             std.mem.eql(u8, host, "youtu.be"))
         {
-            const music_url = try self.toYoutubeMusicUrl(url_str, allocator);
+            const music_url = try Orchestrator.toYoutubeMusicUrl(url_str, allocator);
             defer allocator.free(music_url);
             return try platform_mod.extractYoutubeInfo(self.http, self.cache, allocator, music_url);
         }

@@ -14,27 +14,26 @@ pub fn resolveSpotifyShortLink(_http: infra.HttpClient, short_url: []const u8) !
     const uri = try std.Uri.parse(short_url);
     var client: std.http.Client = .{ .allocator = std.heap.page_allocator };
     defer client.deinit();
-    client.redirect_maximum = 10;
-    client.follow_redirects = true;
-    var headers = std.http.Headers.init(std.heap.page_allocator);
-    defer headers.deinit();
-    try headers.append("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-    var req = try client.request(.GET, uri, headers, .{});
-    defer req.deinit();
-    try req.send(.{});
-    try req.wait();
 
-    const final_url = try req.response.allocLocation(std.heap.page_allocator);
-    // Try to find track URL
-    if (std.mem.indexOf(u8, final_url, "open.spotify.com/track/")) |pos| {
-        const after = final_url[pos..];
-        const qpos = std.mem.indexOfScalar(u8, after, '?') orelse after.len;
-        return try std.heap.page_allocator.dupe(u8, after[0..qpos]);
-    }
+    var response_body = std.ArrayList(u8).init(std.heap.page_allocator);
+    defer response_body.deinit();
 
-    // Fallback: scan body for track URL
-    const body = try req.reader().readAllAlloc(std.heap.page_allocator, 1024 * 1024);
-    defer std.heap.page_allocator.free(body);
+    var server_header_buffer: [4096]u8 = undefined;
+
+    // Fetch with redirect following — max 10 redirects
+    const fetch_result = try client.fetch(.{
+        .location = .{ .uri = uri },
+        .method = .GET,
+        .headers = .{ .user_agent = .{ .override = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } },
+        .response_storage = .{ .dynamic = &response_body },
+        .server_header_buffer = &server_header_buffer,
+        .redirect_behavior = @as(std.http.Client.Request.RedirectBehavior, @enumFromInt(@as(u16, 10))),
+    });
+    _ = fetch_result;
+
+    // With zig 0.14's fetch, redirects are followed automatically.
+    // Search for track URL in the final response body.
+    const body = response_body.items;
     const re_track = "open.spotify.com/track/";
     if (std.mem.indexOf(u8, body, re_track)) |pos| {
         const after = body[pos..];
@@ -194,8 +193,8 @@ fn trySpotifyEmbed(http: infra.HttpClient, url: []const u8) !util.SongInfo {
     var artist: []const u8 = "";
     if (entity.object.get("artists")) |arts| {
         if (arts.array.items.len > 0) {
-            artist = arts.array.items[0].object.get("name") orelse return error.BadStructure;
-            artist = artist.string;
+            const name_val = arts.array.items[0].object.get("name") orelse return error.BadStructure;
+            artist = name_val.string;
         }
     }
 
