@@ -14,17 +14,22 @@ pub fn resolveSpotifyShortLink(_http: infra.HttpClient, short_url: []const u8) !
     const uri = try std.Uri.parse(short_url);
     var client: std.http.Client = .{ .allocator = std.heap.page_allocator };
     defer client.deinit();
-    client.redirect_maximum = 10;
-    client.follow_redirects = true;
-    var headers = std.http.Headers.init(std.heap.page_allocator);
-    defer headers.deinit();
-    try headers.append("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-    var req = try client.request(.GET, uri, headers, .{});
+    var server_header_buffer: [16 * 1024]u8 = undefined;
+    const extra_headers = [_]std.http.Header{
+        .{ .name = "User-Agent", .value = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+    };
+    var req = try client.open(.GET, uri, .{
+        .server_header_buffer = &server_header_buffer,
+        .extra_headers = &extra_headers,
+    });
     defer req.deinit();
-    try req.send(.{});
+    try req.send();
     try req.wait();
 
-    const final_url = try req.response.allocLocation(std.heap.page_allocator);
+    const final_url = if (req.response.location) |loc|
+        try std.heap.page_allocator.dupe(u8, loc)
+    else
+        try std.heap.page_allocator.dupe(u8, short_url);
     // Try to find track URL
     if (std.mem.indexOf(u8, final_url, "open.spotify.com/track/")) |pos| {
         const after = final_url[pos..];
@@ -194,8 +199,8 @@ fn trySpotifyEmbed(http: infra.HttpClient, url: []const u8) !util.SongInfo {
     var artist: []const u8 = "";
     if (entity.object.get("artists")) |arts| {
         if (arts.array.items.len > 0) {
-            artist = arts.array.items[0].object.get("name") orelse return error.BadStructure;
-            artist = artist.string;
+            artist = arts.array.items[0].object.get("name").?.string;
+            // ^ .string extracts the inner []const u8 from the Value wrapper
         }
     }
 
@@ -460,22 +465,24 @@ fn searchUrlFallback(query: []const u8) ![]u8 {
 }
 
 fn findFirstVideoId(val: std.json.Value) ?[]const u8 {
+    // Return type is ?[]const u8 — each branch must produce that type.
+    // We use a switch expression but each arm must converge to the return type.
     return switch (val) {
-        .object => |obj| {
+        .object => |obj| blk: {
             if (obj.get("videoId")) |vid| {
-                if (vid.string.len > 0) return vid.string;
+                if (vid.string.len > 0) break :blk vid.string;
             }
             var it = obj.iterator();
             while (it.next()) |entry| {
                 if (findFirstVideoId(entry.value_ptr.*)) |found| return found;
             }
-            null;
+            return null;
         },
         .array => |arr| {
             for (arr.items) |item| {
                 if (findFirstVideoId(item)) |found| return found;
             }
-            null;
+            return null;
         },
         else => null,
     };
@@ -631,9 +638,9 @@ pub fn searchAppleMusic(http: infra.HttpClient, cache: *infra.TTLCache, allocato
 
         if (score > best_score) {
             best_score = score;
-            // Replace itunes.apple.com with music.apple.com
-            best_url = if (std.mem.indexOf(u8, track_url, "itunes.apple.com")) |_|
-                std.mem.replace(u8, track_url, "itunes.apple.com", "music.apple.com", std.heap.page_allocator) catch track_url
+            // Replace itunes.apple.com with music.apple.com — allocPrint the modified URL
+            best_url = if (std.mem.indexOf(u8, track_url, "itunes.apple.com")) |pos|
+                try std.fmt.allocPrint(std.heap.page_allocator, "{s}music.apple.com{s}", .{ track_url[0..pos], track_url[pos + "itunes.apple.com".len..] })
             else
                 track_url;
         }

@@ -110,10 +110,12 @@ pub fn extractHost(url_str: []const u8) ?[]const u8 {
 pub fn containsCi(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
-    const h_lower = std.ascii.lowerString(haystack, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(h_lower);
-    const n_lower = std.ascii.lowerString(needle, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(n_lower);
+    const h_buf = std.heap.page_allocator.alloc(u8, haystack.len) catch return false;
+    defer std.heap.page_allocator.free(h_buf);
+    const h_lower = std.ascii.lowerString(h_buf, haystack);
+    const n_buf = std.heap.page_allocator.alloc(u8, needle.len) catch return false;
+    defer std.heap.page_allocator.free(n_buf);
+    const n_lower = std.ascii.lowerString(n_buf, needle);
     return std.mem.indexOf(u8, h_lower, n_lower) != null;
 }
 
@@ -146,7 +148,7 @@ pub fn normalizeForMatch(allocator: Allocator, s: []const u8) ![]u8 {
         }
         // Replace various punctuation with space
         switch (c) {
-            '-', '\u{2014}', '\u{2013}', '\u{00B7}', '.', ',', '!', '?', '/', '\'', '"' => {
+            '-', '.', ',', '!', '?', '/', '\'', '"' => {
                 try result.append(' ');
             },
             '&' => {
@@ -159,6 +161,7 @@ pub fn normalizeForMatch(allocator: Allocator, s: []const u8) ![]u8 {
     }
     // Collapse whitespace
     var out = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
     var in_space = false;
     for (result.items) |c| {
         if (std.ascii.isWhitespace(c)) {
@@ -171,7 +174,11 @@ pub fn normalizeForMatch(allocator: Allocator, s: []const u8) ![]u8 {
             in_space = false;
         }
     }
-    return out.items;
+    // Trim trailing whitespace
+    while (out.items.len > 0 and std.ascii.isWhitespace(out.getLast())) {
+        out.items.len -= 1;
+    }
+    return try out.toOwnedSlice();
 }
 
 /// Normalize query: strip parens, feat, platform names, etc.
@@ -188,7 +195,7 @@ pub fn normalizeQuery(allocator: Allocator, artist: []const u8, title: []const u
         try result.append(' ');
     }
     try result.appendSlice(normalized_title);
-    return result.items;
+    return try result.toOwnedSlice();
 }
 
 /// Escape text for Telegram MarkdownV2
@@ -205,7 +212,7 @@ pub fn md2(allocator: Allocator, s: []const u8) ![]u8 {
             else => try result.append(c),
         }
     }
-    return result.items;
+    return try result.toOwnedSlice();
 }
 
 /// Clean YouTube-specific info from title and artist
@@ -214,8 +221,7 @@ pub fn cleanYoutubeInfo(allocator: Allocator, title: []const u8, artist: []const
     // Strip " - Topic" suffix
     if (std.mem.endsWith(u8, artist, " - Topic")) {
         try artist_clean.appendSlice(artist[0 .. artist.len - " - Topic".len]);
-    } else if (std.mem.endsWith(u8, std.ascii.lowerString(artist, std.heap.page_allocator), "vevo")) {
-        // skip VEVO via the helper above, or just remove last 4
+    } else if (std.ascii.endsWithIgnoreCase(artist, "vevo")) {
         try artist_clean.appendSlice(artist[0 .. artist.len - 4]);
     } else if (std.mem.endsWith(u8, artist, "Official")) {
         try artist_clean.appendSlice(artist[0 .. artist.len - "Official".len]);
@@ -242,8 +248,9 @@ pub fn cleanYoutubeInfo(allocator: Allocator, title: []const u8, artist: []const
 /// Check if a string looks like an album name
 pub fn isAlbumish(s: []const u8) bool {
     if (s.len == 0) return false;
-    const l = std.ascii.lowerString(s, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(l);
+    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return false;
+    defer std.heap.page_allocator.free(buf);
+    const l = std.ascii.lowerString(buf, s);
     const hints = [_][]const u8{ "original soundtrack", "soundtrack", "ost", "score", "music from", "season ", " vol.", " volume ", ":" };
     for (hints) |h| {
         if (std.mem.indexOf(u8, l, h) != null) return true;
@@ -254,8 +261,9 @@ pub fn isAlbumish(s: []const u8) bool {
 /// Check if a string looks like an artist list (has commas, &, feat, etc.)
 pub fn looksLikeArtistList(s: []const u8) bool {
     if (s.len == 0) return false;
-    const l = std.ascii.lowerString(s, std.heap.page_allocator);
-    defer std.heap.page_allocator.free(l);
+    const buf = std.heap.page_allocator.alloc(u8, s.len) catch return false;
+    defer std.heap.page_allocator.free(buf);
+    const l = std.ascii.lowerString(buf, s);
     const has_sep = std.mem.indexOfAny(u8, l, ",&") != null or
         std.mem.indexOf(u8, l, " and ") != null or
         std.mem.indexOf(u8, l, " feat") != null or
@@ -267,9 +275,10 @@ pub fn looksLikeArtistList(s: []const u8) bool {
 
 /// URL-encode a string
 pub fn urlEncode(allocator: Allocator, s: []const u8) ![]u8 {
-    return std.mem.replace(u8, s, " ", "%20", allocator);
-    // For a proper encoding, would use std.unicode.utf8Encode etc.
-    // But for search queries, just encoding spaces and simple chars works
+    const out_len = std.mem.replacementSize(u8, s, " ", "%20");
+    const result = try allocator.alloc(u8, out_len);
+    _ = std.mem.replace(u8, s, " ", "%20", result);
+    return result;
 }
 
 /// Extract text between two markers (simple, no regex)
@@ -282,7 +291,7 @@ pub fn extractBetween(haystack: []const u8, start_marker: []const u8, end_marker
 
 /// Extract content attribute from a meta tag by property value
 pub fn extractMetaContent(haystack: []const u8, property: []const u8) ?[]const u8 {
-    const search = try std.fmt.allocPrint(std.heap.page_allocator, "property=\"{s}\"", .{property}) catch return null;
+    const search = std.fmt.allocPrint(std.heap.page_allocator, "property=\"{s}\"", .{property}) catch return null;
     defer std.heap.page_allocator.free(search);
     const start = std.mem.indexOf(u8, haystack, search) orelse return null;
     const after_prop = haystack[start..];
@@ -294,9 +303,14 @@ pub fn extractMetaContent(haystack: []const u8, property: []const u8) ?[]const u
     return after_prop[value_start .. value_start + end];
 }
 
-/// Free if allocated (safe no-op for empty strings)
-pub fn freeIfAllocated(allocator: Allocator, s: []const u8) void {
-    if (s.len > 0) allocator.free(s);
+/// Free if not allocated with page allocator (no-op for read-only memory)
+pub fn freeIfAllocated(allocator: Allocator, ptr: anytype) void {
+    _ = allocator;
+    if (@TypeOf(ptr) == []u8 or @TypeOf(ptr) == []const u8) {
+        if (ptr.len > 0) {
+            std.heap.page_allocator.free(ptr);
+        }
+    }
 }
 
 /// Simple Levenshtein distance
@@ -340,7 +354,7 @@ pub fn splitByDash(s: []const u8) ?struct { left: []const u8, right: []const u8 
     if (std.mem.indexOf(u8, s, " by ")) |pos| {
         return .{ .left = std.mem.trim(u8, s[0..pos], " "), .right = std.mem.trim(u8, s[pos + 4 ..], " ") };
     }
-    const dashes = [_][]const u8{ "\u{2014}", "\u{2013}", " - ", " – " };
+    const dashes = [_][]const u8{ "\u{2014}", "\u{2013}", " - ", " \u{2013} " };
     for (dashes) |dash| {
         if (std.mem.indexOf(u8, s, dash)) |pos| {
             return .{ .left = std.mem.trim(u8, s[0..pos], " "), .right = std.mem.trim(u8, s[pos + dash.len ..], " ") };
